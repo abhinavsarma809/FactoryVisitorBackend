@@ -50,3 +50,4 @@ C:\Users\2440772\source\repos\ConsoleApp3\FactoryVisitor\obj\Debug\net9.0\refint
 C:\Users\2440772\source\repos\ConsoleApp3\FactoryVisitor\obj\Debug\net9.0\FactoryVisitor.pdb
 C:\Users\2440772\source\repos\ConsoleApp3\FactoryVisitor\obj\Debug\net9.0\FactoryVisitor.genruntimeconfig.cache
 C:\Users\2440772\source\repos\ConsoleApp3\FactoryVisitor\obj\Debug\net9.0\ref\FactoryVisitor.dll
+C:\Users\2440772\source\repos\ConsoleApp3\FactoryVisitor\obj\Debug\net9.0\FactoryVisitor.sourcelink.json

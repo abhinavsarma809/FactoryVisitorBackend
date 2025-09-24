@@ -41,7 +41,7 @@ if (app.Environment.IsDevelopment())
 
 app.UseHttpsRedirection();
 
-// ✅ Apply CORS before routing
+
 app.UseCors("AllowReactApp");
 
 app.UseAuthorization();
