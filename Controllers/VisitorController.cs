@@ -44,14 +44,15 @@ namespace FactoryVisitorApp.Controllers
             using var conn = DBHelper.GetConnection();
             conn.Open();
 
-            string query = @"INSERT INTO Visitors (FullName, ContactNumber, Email, Purpose, ZoneID, PasswordHash, Gender)
-                     VALUES (@FullName, @ContactNumber, @Email, @Purpose, @ZoneID, @PasswordHash, @Gender)";
+            string query = @"INSERT INTO Visitors (FullName, ContactNumber, Email, PasswordHash, Gender)
+VALUES (@FullName, @ContactNumber, @Email, @PasswordHash, @Gender)
+";
             var cmd = new MySqlCommand(query, conn);
             cmd.Parameters.AddWithValue("@FullName", visitor.FullName);
             cmd.Parameters.AddWithValue("@ContactNumber", visitor.ContactNumber);
             cmd.Parameters.AddWithValue("@Email", visitor.Email);
             cmd.Parameters.AddWithValue("@Purpose", visitor.Purpose);
-            cmd.Parameters.AddWithValue("@ZoneID", visitor.ZoneID);
+            
             cmd.Parameters.AddWithValue("@PasswordHash", visitor.PasswordHash);
             cmd.Parameters.AddWithValue("@Gender", visitor.Gender);
 

@@ -23,7 +23,7 @@ namespace FactoryVisitorApp.Models
 
         public DateTime? CheckOutTime { get; set; }
 
-        public int ZoneID { get; set; }
+        public int? ZoneID { get; set; }
 
         [Required]
         public string Gender { get; set; }  // New field added
