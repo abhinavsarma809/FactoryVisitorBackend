@@ -25,15 +25,15 @@ namespace FactoryVisitorApp.Controllers
         {
             using var conn = DBHelper.GetConnection();
             conn.Open();
-
-            string query = "INSERT INTO Zones (ZoneName, Description) VALUES (@ZoneName, @Description)";
+            string query = "INSERT INTO Zones (ZoneName, Description, IsRestricted) VALUES (@ZoneName, @Description, @IsRestricted)";
             var cmd = new MySqlCommand(query, conn);
             cmd.Parameters.AddWithValue("@ZoneName", zone.ZoneName);
             cmd.Parameters.AddWithValue("@Description", zone.Description);
+            cmd.Parameters.AddWithValue("@IsRestricted", zone.IsRestricted);
             cmd.ExecuteNonQuery();
-
             return Ok(new { message = "Zone inserted successfully." });
         }
+
 
 
         [HttpPost("register")]
@@ -65,192 +65,198 @@ namespace FactoryVisitorApp.Controllers
         {
             string hashedPassword = HashPassword(visitor.PasswordHash);
 
-using var conn = DBHelper.GetConnection();
-conn.Open();
+            using var conn = DBHelper.GetConnection();
+            conn.Open();
 
 
-string query = "SELECT VisitorID, FullName FROM Visitors WHERE Email=@Email AND PasswordHash=@PasswordHash";
-var cmd = new MySqlCommand(query, conn);
-cmd.Parameters.AddWithValue("@Email", visitor.Email);
-cmd.Parameters.AddWithValue("@PasswordHash", hashedPassword);
+            string query = "SELECT VisitorID, FullName FROM Visitors WHERE Email=@Email AND PasswordHash=@PasswordHash";
+            var cmd = new MySqlCommand(query, conn);
+            cmd.Parameters.AddWithValue("@Email", visitor.Email);
+            cmd.Parameters.AddWithValue("@PasswordHash", hashedPassword);
 
-using var reader = cmd.ExecuteReader();
-if (reader.Read())
-{
-    int visitorId = reader.GetInt32("VisitorID");
-    string fullName = reader.GetString("FullName");
+            using var reader = cmd.ExecuteReader();
+            if (reader.Read())
+            {
+                int visitorId = reader.GetInt32("VisitorID");
+                string fullName = reader.GetString("FullName");
 
-    return Ok(new
-    {
-        message = "Login successful",
-        visitorId = visitorId,
-        fullName = fullName
-    });
-}
-else
-{
-    return Unauthorized(new { message = "Invalid email or password" });
-}
+                return Ok(new
+                {
+                    message = "Login successful",
+                    visitorId = visitorId,
+                    fullName = fullName
+                });
+            }
+            else
+            {
+                return Unauthorized(new { message = "Invalid email or password" });
+            }
 
         }
-      [HttpPost("checkin/{id}")]
-public IActionResult CheckIn(int id, [FromBody] CheckInDto dto)
-{
-    using var conn = DBHelper.GetConnection();
-    conn.Open();
-
-    string zoneQuery = @"SELECT Z.ZoneName, Z.IsRestricted, V.Purpose 
-                         FROM Visitors V 
-                         JOIN Zones Z ON V.ZoneID = Z.ZoneID 
-                         WHERE V.VisitorID = @VisitorID";
-
-    var zoneCmd = new MySqlCommand(zoneQuery, conn);
-    zoneCmd.Parameters.AddWithValue("@VisitorID", id);
-    var reader = zoneCmd.ExecuteReader();
-
-    if (reader.Read())
-    {
-        string zoneName = reader["ZoneName"].ToString();
-        bool isRestricted = Convert.ToBoolean(reader["IsRestricted"]);
-        string purpose = reader["Purpose"]?.ToString() ?? "Not specified";
-
-        reader.Close();
-
-        var checkInTime = dto.CheckInTime;
-
-        // Update Visitors table with check-in time
-        string updateQuery = "UPDATE Visitors SET CheckInTime = @CheckInTime WHERE VisitorID = @VisitorID";
-        var updateCmd = new MySqlCommand(updateQuery, conn);
-        updateCmd.Parameters.AddWithValue("@CheckInTime", checkInTime);
-        updateCmd.Parameters.AddWithValue("@VisitorID", id);
-        updateCmd.ExecuteNonQuery();
-
-        // Log the check-in action
-        string logQuery = @"INSERT INTO VisitorLogs (VisitorID, ZoneID, ActionType, Timestamp)
-                            VALUES (@VisitorID, (SELECT ZoneID FROM Visitors WHERE VisitorID = @VisitorID), 'CheckIn', @Timestamp)";
-        var logCmd = new MySqlCommand(logQuery, conn);
-        logCmd.Parameters.AddWithValue("@VisitorID", id);
-        logCmd.Parameters.AddWithValue("@Timestamp", checkInTime);
-        logCmd.ExecuteNonQuery();
-
-        // Convert UTC to IST and format
-        var istZone = TimeZoneInfo.FindSystemTimeZoneById("India Standard Time");
-        var istTime = TimeZoneInfo.ConvertTimeFromUtc(checkInTime.ToUniversalTime(), istZone);
-        string formattedTime = istTime.ToString("dd-MMM-yyyy hh:mm tt");
-
-        var response = new
+        [HttpPost("checkin/{id}")]
+        public IActionResult CheckIn(int id, [FromBody] CheckInDto dto)
         {
-            message = isRestricted ? "ALERT: Visitor entered a restricted zone!" : "Check-in recorded.",
-            zone = zoneName,
-            purpose = purpose,
-            checkInTime = formattedTime
-        };
+            using var conn = DBHelper.GetConnection();
+            conn.Open();
 
-        return Ok(response);
-    }
+            // Step 1: Get all zones the visitor is allowed to access
+            string accessQuery = @"
+        SELECT Z.ZoneID, Z.ZoneName, Z.IsRestricted
+        FROM VisitorZoneAccess VZA
+        JOIN Zones Z ON VZA.ZoneID = Z.ZoneID
+        WHERE VZA.VisitorID = @VisitorID";
 
-    return NotFound(new { message = "Visitor not found." });
-}
+            var accessCmd = new MySqlCommand(accessQuery, conn);
+            accessCmd.Parameters.AddWithValue("@VisitorID", id);
+            var reader = accessCmd.ExecuteReader();
 
-[HttpPut("access/{visitorId}")]
-public IActionResult UpdateVisitorAccess(int visitorId, [FromBody] List<int> allowedZoneIds)
-{
-    if (allowedZoneIds == null || !allowedZoneIds.Any())
-    {
-        return BadRequest("Zone ID list cannot be empty.");
-    }
+            List<int> allowedZoneIds = new();
+            string zoneName = "";
+            bool isRestricted = false;
 
-    using var conn = DBHelper.GetConnection();
-    conn.Open();
+            if (!reader.HasRows)
+            {
+                return Unauthorized(new { message = "Access denied. No zones assigned." });
+            }
 
-    using var transaction = conn.BeginTransaction();
+            while (reader.Read())
+            {
+                allowedZoneIds.Add(reader.GetInt32("ZoneID"));
+                zoneName = reader["ZoneName"].ToString();
+                isRestricted = Convert.ToBoolean(reader["IsRestricted"]);
+            }
+            reader.Close();
 
-    try
-    {
-        // Delete existing access
-        var deleteCmd = new MySqlCommand("DELETE FROM VisitorZoneAccess WHERE VisitorID = @VisitorID", conn, transaction);
-        deleteCmd.Parameters.AddWithValue("@VisitorID", visitorId);
-        deleteCmd.ExecuteNonQuery();
+            // Step 2: Log check-in (assuming one zone per visitor for now)
+            var checkInTime = dto.CheckInTime;
 
-        // Insert new access
-        foreach (var zoneId in allowedZoneIds)
-        {
-            var insertCmd = new MySqlCommand("INSERT INTO VisitorZoneAccess (VisitorID, ZoneID) VALUES (@VisitorID, @ZoneID)", conn, transaction);
-            insertCmd.Parameters.AddWithValue("@VisitorID", visitorId);
-            insertCmd.Parameters.AddWithValue("@ZoneID", zoneId);
-            insertCmd.ExecuteNonQuery();
+            string updateQuery = "UPDATE Visitors SET CheckInTime = @CheckInTime WHERE VisitorID = @VisitorID";
+            var updateCmd = new MySqlCommand(updateQuery, conn);
+            updateCmd.Parameters.AddWithValue("@CheckInTime", checkInTime);
+            updateCmd.Parameters.AddWithValue("@VisitorID", id);
+            updateCmd.ExecuteNonQuery();
+
+            string logQuery = @"
+        INSERT INTO VisitorLogs (VisitorID, ZoneID, ActionType, Timestamp)
+        VALUES (@VisitorID, @ZoneID, 'CheckIn', @Timestamp)";
+            var logCmd = new MySqlCommand(logQuery, conn);
+            logCmd.Parameters.AddWithValue("@VisitorID", id);
+            logCmd.Parameters.AddWithValue("@ZoneID", allowedZoneIds.First()); // assuming one zone
+            logCmd.Parameters.AddWithValue("@Timestamp", checkInTime);
+            logCmd.ExecuteNonQuery();
+
+            var istZone = TimeZoneInfo.FindSystemTimeZoneById("India Standard Time");
+            var istTime = TimeZoneInfo.ConvertTimeFromUtc(checkInTime.ToUniversalTime(), istZone);
+            string formattedTime = istTime.ToString("dd-MMM-yyyy hh:mm tt");
+
+            return Ok(new
+            {
+                message = isRestricted ? "ALERT: Visitor entered a restricted zone!" : "Check-in recorded.",
+                zone = zoneName,
+                checkInTime = formattedTime
+            });
         }
 
-        transaction.Commit();
-        return Ok(new { Message = "Visitor access updated successfully.", VisitorID = visitorId, ZonesAssigned = allowedZoneIds });
-    }
-    catch (Exception ex)
-    {
-        transaction.Rollback();
-        return StatusCode(500, $"Internal server error: {ex.Message}");
-    }
-}
+
+        [HttpPut("access/{visitorId}")]
+        public IActionResult UpdateVisitorAccess(int visitorId, [FromBody] List<int> allowedZoneIds)
+        {
+            if (allowedZoneIds == null || !allowedZoneIds.Any())
+            {
+                return BadRequest("Zone ID list cannot be empty.");
+            }
+
+            using var conn = DBHelper.GetConnection();
+            conn.Open();
+
+            using var transaction = conn.BeginTransaction();
+
+            try
+            {
+                // Delete existing access
+                var deleteCmd = new MySqlCommand("DELETE FROM VisitorZoneAccess WHERE VisitorID = @VisitorID", conn, transaction);
+                deleteCmd.Parameters.AddWithValue("@VisitorID", visitorId);
+                deleteCmd.ExecuteNonQuery();
+
+                // Insert new access
+                foreach (var zoneId in allowedZoneIds)
+                {
+                    var insertCmd = new MySqlCommand("INSERT INTO VisitorZoneAccess (VisitorID, ZoneID) VALUES (@VisitorID, @ZoneID)", conn, transaction);
+                    insertCmd.Parameters.AddWithValue("@VisitorID", visitorId);
+                    insertCmd.Parameters.AddWithValue("@ZoneID", zoneId);
+                    insertCmd.ExecuteNonQuery();
+                }
+
+                transaction.Commit();
+                return Ok(new { Message = "Visitor access updated successfully.", VisitorID = visitorId, ZonesAssigned = allowedZoneIds });
+            }
+            catch (Exception ex)
+            {
+                transaction.Rollback();
+                return StatusCode(500, $"Internal server error: {ex.Message}");
+            }
+        }
 
 
 
-[HttpGet("access/{visitorId}")]
-public IActionResult GetVisitorAccess(int visitorId)
-{
-    using var conn = DBHelper.GetConnection();
-    conn.Open();
+        [HttpGet("access/{visitorId}")]
+        public IActionResult GetVisitorAccess(int visitorId)
+        {
+            using var conn = DBHelper.GetConnection();
+            conn.Open();
 
-    var cmd = new MySqlCommand(@"
+            var cmd = new MySqlCommand(@"
         SELECT z.ZoneID, z.ZoneName, z.Description, z.IsRestricted
         FROM VisitorZoneAccess vza
         JOIN Zones z ON vza.ZoneID = z.ZoneID
         WHERE vza.VisitorID = @VisitorID", conn);
 
-    cmd.Parameters.AddWithValue("@VisitorID", visitorId);
+            cmd.Parameters.AddWithValue("@VisitorID", visitorId);
 
-    var reader = cmd.ExecuteReader();
-    var allowedZones = new List<object>();
+            var reader = cmd.ExecuteReader();
+            var allowedZones = new List<object>();
 
-    while (reader.Read())
-    {
-        allowedZones.Add(new
-        {
-            ZoneID = reader.GetInt32("ZoneID"),
-            ZoneName = reader.GetString("ZoneName"),
-            Description = reader.GetString("Description"),
-            IsRestricted = reader.GetBoolean("IsRestricted")
-        });
-    }
+            while (reader.Read())
+            {
+                allowedZones.Add(new
+                {
+                    ZoneID = reader.GetInt32("ZoneID"),
+                    ZoneName = reader.GetString("ZoneName"),
+                    Description = reader.GetString("Description"),
+                    IsRestricted = reader.GetBoolean("IsRestricted")
+                });
+            }
 
-    return Ok(new { allowedZones });
-}
+            return Ok(new { allowedZones });
+        }
 
 
 
         [HttpPut("update/{id}")]
-public IActionResult UpdateVisitorDetails(int id, [FromBody] VisitorUpdateDto dto)
-{
-    using var conn = DBHelper.GetConnection();
-    conn.Open();
+        public IActionResult UpdateVisitorDetails(int id, [FromBody] VisitorUpdateDto dto)
+        {
+            using var conn = DBHelper.GetConnection();
+            conn.Open();
 
-    string updateQuery = @"UPDATE Visitors 
+            string updateQuery = @"UPDATE Visitors 
                            SET ZoneID = @ZoneID, Purpose = @Purpose, AuthorizedBy = @AuthorizedBy 
                            WHERE VisitorID = @VisitorID";
 
-    using var cmd = new MySqlCommand(updateQuery, conn);
-    cmd.Parameters.AddWithValue("@ZoneID", dto.ZoneID);
-    cmd.Parameters.AddWithValue("@Purpose", dto.Purpose);
-    cmd.Parameters.AddWithValue("@AuthorizedBy", dto.AuthorizedBy);
-    cmd.Parameters.AddWithValue("@VisitorID", id);
+            using var cmd = new MySqlCommand(updateQuery, conn);
+            cmd.Parameters.AddWithValue("@ZoneID", dto.ZoneID);
+            cmd.Parameters.AddWithValue("@Purpose", dto.Purpose);
+            cmd.Parameters.AddWithValue("@AuthorizedBy", dto.AuthorizedBy);
+            cmd.Parameters.AddWithValue("@VisitorID", id);
 
-    int rowsAffected = cmd.ExecuteNonQuery();
+            int rowsAffected = cmd.ExecuteNonQuery();
 
-    if (rowsAffected > 0)
-    {
-        return Ok(new { message = "Visitor details updated successfully." });
-    }
+            if (rowsAffected > 0)
+            {
+                return Ok(new { message = "Visitor details updated successfully." });
+            }
 
-    return NotFound(new { message = "Visitor not found." });
-}
+            return NotFound(new { message = "Visitor not found." });
+        }
 
 
         [HttpPost("checkout/{id}")]
@@ -305,28 +311,28 @@ public IActionResult UpdateVisitorDetails(int id, [FromBody] VisitorUpdateDto dt
             return NotFound(new { message = "Visitor not found." });
         }
         [HttpDelete("/{id}")]
-public IActionResult DeleteVisitor(int id)
-{
-    using var conn = DBHelper.GetConnection();
-    conn.Open();
+        public IActionResult DeleteVisitor(int id)
+        {
+            using var conn = DBHelper.GetConnection();
+            conn.Open();
 
-    string deleteLogsQuery = "DELETE FROM VisitorLogs WHERE VisitorID = @VisitorID";
-    var logCmd = new MySqlCommand(deleteLogsQuery, conn);
-    logCmd.Parameters.AddWithValue("@VisitorID", id);
-    logCmd.ExecuteNonQuery();
+            string deleteLogsQuery = "DELETE FROM VisitorLogs WHERE VisitorID = @VisitorID";
+            var logCmd = new MySqlCommand(deleteLogsQuery, conn);
+            logCmd.Parameters.AddWithValue("@VisitorID", id);
+            logCmd.ExecuteNonQuery();
 
-    string deleteVisitorQuery = "DELETE FROM Visitors WHERE VisitorID = @VisitorID";
-    var visitorCmd = new MySqlCommand(deleteVisitorQuery, conn);
-    visitorCmd.Parameters.AddWithValue("@VisitorID", id);
-    int rowsAffected = visitorCmd.ExecuteNonQuery();
+            string deleteVisitorQuery = "DELETE FROM Visitors WHERE VisitorID = @VisitorID";
+            var visitorCmd = new MySqlCommand(deleteVisitorQuery, conn);
+            visitorCmd.Parameters.AddWithValue("@VisitorID", id);
+            int rowsAffected = visitorCmd.ExecuteNonQuery();
 
-    if (rowsAffected > 0)
-    {
-        return Ok(new { message = "Visitor data deleted successfully." });
-    }
+            if (rowsAffected > 0)
+            {
+                return Ok(new { message = "Visitor data deleted successfully." });
+            }
 
-    return NotFound(new { message = "Visitor not found." });
-}
+            return NotFound(new { message = "Visitor not found." });
+        }
 
 
         [HttpGet("info/{id}")]
@@ -365,18 +371,20 @@ public IActionResult DeleteVisitor(int id)
             var visitors = new List<object>();
             using var conn = DBHelper.GetConnection();
             conn.Open();
-            string query = "SELECT VisitorID, FullName, CheckInTime, CheckOutTime FROM Visitors";
+            string query = "SELECT VisitorID, FullName, CheckInTime, CheckOutTime, Status, ZoneID FROM Visitors";
 
             var cmd = new MySqlCommand(query, conn);
             var reader = cmd.ExecuteReader();
             while (reader.Read())
             {
-               visitors.Add(new
+                visitors.Add(new
 {
     VisitorID = Convert.ToInt32(reader["VisitorID"]),
     FullName = reader["FullName"].ToString(),
     CheckInTime = reader["CheckInTime"] == DBNull.Value ? null : reader["CheckInTime"],
-    CheckOutTime = reader["CheckOutTime"] == DBNull.Value ? null : reader["CheckOutTime"]
+    CheckOutTime = reader["CheckOutTime"] == DBNull.Value ? null : reader["CheckOutTime"],
+    Status = reader["Status"]?.ToString() ?? "Pending",
+    ZoneID = reader["ZoneID"] == DBNull.Value ? null : reader["ZoneID"]
 });
 
             }
@@ -406,48 +414,106 @@ public IActionResult DeleteVisitor(int id)
 
             return Ok(zones);
         }
-[HttpDelete("zone/{id}")]
-public IActionResult DeleteZone(int id)
+        [HttpDelete("zone/{id}")]
+        public IActionResult DeleteZone(int id)
+        {
+            using var conn = DBHelper.GetConnection();
+            conn.Open();
+
+            // Optional: Check if any visitors are still assigned to this zone
+            string checkVisitorsQuery = "SELECT COUNT(*) FROM Visitors WHERE ZoneID = @ZoneID";
+            var checkCmd = new MySqlCommand(checkVisitorsQuery, conn);
+            checkCmd.Parameters.AddWithValue("@ZoneID", id);
+            int visitorCount = Convert.ToInt32(checkCmd.ExecuteScalar());
+
+            if (visitorCount > 0)
+            {
+                return BadRequest(new { message = "Cannot delete zone. Visitors are still assigned to this zone." });
+            }
+
+            string deleteZoneQuery = "DELETE FROM Zones WHERE ZoneID = @ZoneID";
+            var zoneCmd = new MySqlCommand(deleteZoneQuery, conn);
+            zoneCmd.Parameters.AddWithValue("@ZoneID", id);
+            int rowsAffected = zoneCmd.ExecuteNonQuery();
+
+            if (rowsAffected > 0)
+            {
+                return Ok(new { message = "Zone deleted successfully." });
+            }
+
+            return NotFound(new { message = "Zone not found." });
+        }
+
+        [HttpPut("zone/restriction/{zoneId}")]
+        public IActionResult UpdateZoneRestriction(int zoneId, [FromBody] bool isRestricted)
+        {
+            using var conn = DBHelper.GetConnection();
+            conn.Open();
+            var cmd = new MySqlCommand("UPDATE Zones SET IsRestricted = @IsRestricted WHERE ZoneID = @ZoneID", conn);
+            cmd.Parameters.AddWithValue("@IsRestricted", isRestricted);
+            cmd.Parameters.AddWithValue("@ZoneID", zoneId);
+            cmd.ExecuteNonQuery();
+            return Ok(new { message = "Zone restriction updated." });
+        }
+        [HttpPost("accept/{id}")]
+        public IActionResult AcceptVisitor(int id)
+        {
+            using var conn = DBHelper.GetConnection();
+            conn.Open();
+
+            string query = "UPDATE Visitors SET Status = 'Accepted' WHERE VisitorID = @VisitorID";
+            var cmd = new MySqlCommand(query, conn);
+            cmd.Parameters.AddWithValue("@VisitorID", id);
+            cmd.ExecuteNonQuery();
+
+            return Ok(new { message = "Visitor accepted." });
+        }
+
+        [HttpPost("reject/{id}")]
+        public IActionResult RejectVisitor(int id)
+        {
+            using var conn = DBHelper.GetConnection();
+            conn.Open();
+
+            string query = "UPDATE Visitors SET Status = 'Rejected' WHERE VisitorID = @VisitorID";
+            var cmd = new MySqlCommand(query, conn);
+            cmd.Parameters.AddWithValue("@VisitorID", id);
+            cmd.ExecuteNonQuery();
+
+            return Ok(new { message = "Visitor rejected." });
+        }
+
+        [HttpGet("{id}")]
+        public IActionResult GetVisitorStatus(int id)
+        {
+            using var conn = DBHelper.GetConnection();
+            conn.Open();
+
+            string query = "SELECT Status FROM Visitors WHERE VisitorID = @VisitorID";
+            var cmd = new MySqlCommand(query, conn);
+            cmd.Parameters.AddWithValue("@VisitorID", id);
+            var status = cmd.ExecuteScalar()?.ToString() ?? "Pending";
+
+            return Ok(new { status });
+        }
+
+[HttpPost("setstatus/{id}")]
+public IActionResult SetVisitorStatus(int id, [FromBody] dynamic body)
 {
     using var conn = DBHelper.GetConnection();
     conn.Open();
 
-    // Optional: Check if any visitors are still assigned to this zone
-    string checkVisitorsQuery = "SELECT COUNT(*) FROM Visitors WHERE ZoneID = @ZoneID";
-    var checkCmd = new MySqlCommand(checkVisitorsQuery, conn);
-    checkCmd.Parameters.AddWithValue("@ZoneID", id);
-    int visitorCount = Convert.ToInt32(checkCmd.ExecuteScalar());
-
-    if (visitorCount > 0)
-    {
-        return BadRequest(new { message = "Cannot delete zone. Visitors are still assigned to this zone." });
-    }
-
-    string deleteZoneQuery = "DELETE FROM Zones WHERE ZoneID = @ZoneID";
-    var zoneCmd = new MySqlCommand(deleteZoneQuery, conn);
-    zoneCmd.Parameters.AddWithValue("@ZoneID", id);
-    int rowsAffected = zoneCmd.ExecuteNonQuery();
-
-    if (rowsAffected > 0)
-    {
-        return Ok(new { message = "Zone deleted successfully." });
-    }
-
-    return NotFound(new { message = "Zone not found." });
-}
-
-[HttpPut("zone/restriction/{zoneId}")]
-public IActionResult UpdateZoneRestriction(int zoneId, [FromBody] bool isRestricted)
-{
-    using var conn = DBHelper.GetConnection();
-    conn.Open();
-    var cmd = new MySqlCommand("UPDATE Zones SET IsRestricted = @IsRestricted WHERE ZoneID = @ZoneID", conn);
-    cmd.Parameters.AddWithValue("@IsRestricted", isRestricted);
-    cmd.Parameters.AddWithValue("@ZoneID", zoneId);
+    string status = body.status;
+    string query = "UPDATE Visitors SET Status = @Status WHERE VisitorID = @VisitorID";
+    var cmd = new MySqlCommand(query, conn);
+    cmd.Parameters.AddWithValue("@Status", status);
+    cmd.Parameters.AddWithValue("@VisitorID", id);
     cmd.ExecuteNonQuery();
-    return Ok(new { message = "Zone restriction updated." });
+
+    return Ok(new { message = $"Status set to {status}" });
 }
 
-
     }
+    
+    
 }
